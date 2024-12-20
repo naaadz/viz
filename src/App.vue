@@ -435,13 +435,15 @@ onBeforeUnmount(() => {
 .controls {
   padding: 2rem;
   position: fixed;
+  left: 0;
   bottom: 0;
   background: black;
-  width: 100vw;
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 1rem;
   align-items: center;
+  color: white;
 }
 
 .effect-toggles {
