@@ -1,465 +1,522 @@
-# AudioVisualizer.vue
 <template>
-  <div>
-    <div class="audio-visualizer">
-      <div class="visualization-container" ref="container">
-        <!-- Main image with filters -->
-        <img
-          :src="imageUrl || placeholderUrl"
-          :style="imageStyle"
-          class="the-image"
-          alt="Visualization"
-          ref="visualizerImage"
-        />
+  <div class="scope-visualizer" :style="controlStyles">
+    <TransitionGroup name="fade" tag="div" class="bg-container">
+      <img :key="currentImageIndex" :src="currentImage" class="bg" alt="" />
+    </TransitionGroup>
+    <canvas ref="canvas" class="scope-canvas"></canvas>
 
-        <!-- SVG Overlay for morphing shapes -->
-        <svg class="svg-overlay" :viewBox="`0 0 ${containerWidth} ${containerHeight}`">
-          <path :d="morphPath" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="2" />
-        </svg>
-
-        <!-- Canvas for particles -->
-        <canvas
-          ref="particleCanvas"
-          class="particle-overlay"
-          :width="containerWidth"
-          :height="containerHeight"
-        ></canvas>
-
-        <!-- Waveform overlay -->
-        <canvas
-          ref="waveformCanvas"
-          class="waveform-overlay"
-          :width="containerWidth"
-          :height="containerHeight"
-        ></canvas>
-      </div>
-    </div>
     <div class="controls">
-      <div class="upload-controls">
-        <label class="upload-btn">
-          Upload Audio
-          <input type="file" accept="audio/*" @change="handleAudioUpload" class="file-input" />
-        </label>
+      <label class="button upload-btn disabled">
+        <span>Upload Audio</span>
+        <input type="file" accept="audio/*" @change="handleAudioUpload" class="file-input" />
+      </label>
 
-        <label class="upload-btn">
-          Upload Image
-          <input type="file" accept="image/*" @change="handleImageUpload" class="file-input" />
-        </label>
-      </div>
-
-      <div class="effect-toggles">
-        <label v-for="effect in effects" :key="effect.name">
-          <input type="checkbox" v-model="effect.active" @change="updateEffects" />
-          {{ effect.name }}
-        </label>
-      </div>
-
-      <button @click="togglePlay" :disabled="!hasAudio" class="play-btn">
+      <button @click="togglePlay" class="button play-btn">
         {{ isPlaying ? 'Pause' : 'Play' }}
       </button>
+
+      <button
+        class="toggle-abstraction-controls button"
+        :disabled="!isPlaying"
+        @click="abstractionControlsVisible = !abstractionControlsVisible"
+      >
+        ⚙
+      </button>
+    </div>
+
+    <div v-show="abstractionControlsVisible" class="abstraction-controls">
+      <div class="control-group">
+        <label>
+          <span>Wave Modulation</span>
+          <input type="range" v-model="waveModulation" min="0" max="100" class="slider" />
+        </label>
+        <span class="value">{{ waveModulation }}%</span>
+      </div>
+
+      <div class="control-group">
+        <label>
+          <span>Curve Smoothness</span>
+          <input type="range" v-model="curveSmoothing" min="0" max="100" class="slider" />
+        </label>
+        <span class="value">{{ curveSmoothing }}%</span>
+      </div>
+
+      <div class="control-group">
+        <label>
+          <span>Time Distortion</span>
+          <input type="range" v-model="timeDistortion" min="0" max="100" class="slider" />
+        </label>
+        <span class="value">{{ timeDistortion }}%</span>
+      </div>
+
+      <div class="color-controls">
+        <div class="control-group">
+          <label>
+            <span>Color</span>
+            <input type="range" v-model="colorHue" min="0" max="360" class="slider color-slider" />
+          </label>
+        </div>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import {ref, computed, onMounted, onBeforeUnmount} from 'vue';
+import {ref, onMounted, computed, watch, onBeforeUnmount} from 'vue';
 
-// Reactive state
+// Canvas and audio state
+const canvas = ref(null);
+const ctx = ref(null);
+const audioElement = ref(null);
 const audioContext = ref(null);
 const analyser = ref(null);
-const audioSource = ref(null);
-const audioBuffer = ref(null);
 const isPlaying = ref(false);
 const hasAudio = ref(false);
-const imageUrl = ref(null);
-const placeholderUrl = ref('/api/placeholder/500/500');
 const animationId = ref(null);
-const container = ref(null);
-const particleCanvas = ref(null);
-const waveformCanvas = ref(null);
-const containerWidth = ref(500);
-const containerHeight = ref(500);
+const abstractionControlsVisible = ref(false);
 
-// Visualization state
-const particles = ref([]);
-const beatDetected = ref(false);
-const energyHistory = ref([]);
-const ENERGY_THRESHOLD = 0.8;
+// Image state
+const currentImageIndex = ref(1);
+const imageInterval = ref(null);
 
-// Effect toggles
-const effects = ref([
-  {name: 'Filters', active: true},
-  {name: 'Transform', active: false},
-  {name: 'Particles', active: false},
-  {name: 'Waveform', active: true},
-  {name: 'Morphing', active: true}
-]);
+// Abstraction control states
+const waveModulation = ref(30); // Default modulation intensity
+const curveSmoothing = ref(70); // Default curve smoothness
+const timeDistortion = ref(20); // Default time distortion
 
-// Animation state
-const filters = ref({
-  hueRotate: 0,
-  brightness: 100,
-  contrast: 100,
-  blur: 0,
-  scale: 1,
-  rotate: 0,
-  translateZ: 0,
-  perspective: 1000,
-  rotateY: 0
-});
+// Color control state (0-360 for hue)
+const colorHue = ref(180);
 
-// SVG morph state
-const morphPoints = ref([]);
-const morphPath = computed(() => {
-  if (morphPoints.value.length === 0) return '';
-  return `M ${morphPoints.value.join(' L ')} Z`;
-});
+const currentImage = computed(() => `/viz-${currentImageIndex.value}.png`);
 
-// Computed styles
-const imageStyle = computed(() => ({
-  filter: effects.value.find((e) => e.name === 'Filters')?.active
-    ? `
-      hue-rotate(${filters.value.hueRotate}deg)
-      brightness(${filters.value.brightness}%)
-      contrast(${filters.value.contrast}%)
-      blur(${filters.value.blur}px)
-    `
-    : '',
-  transform: effects.value.find((e) => e.name === 'Transform')?.active
-    ? `
-      perspective(${filters.value.perspective}px)
-      translateZ(${filters.value.translateZ}px)
-      scale(${filters.value.scale})
-      rotate(${filters.value.rotate}deg)
-      rotateY(${filters.value.rotateY}deg)
-    `
-    : ''
+// Computed color values for UI elements
+const currentColor = computed(() => `hsl(${colorHue.value}, 100%, 50%)`);
+const currentColorDim = computed(() => `hsla(${colorHue.value}, 100%, 50%, 0.2)`);
+const currentColorBright = computed(() => `hsl(${colorHue.value}, 100%, 70%)`);
+
+// Reactive styles object for dynamic styling
+const controlStyles = computed(() => ({
+  '--current-color': currentColor.value,
+  '--current-color-dim': currentColorDim.value,
+  '--current-color-bright': currentColorBright.value
 }));
 
-// Initialize particles
-const initParticles = () => {
-  const count = 100;
-  particles.value = Array.from({length: count}, () => ({
-    x: Math.random() * containerWidth.value,
-    y: Math.random() * containerHeight.value,
-    size: Math.random() * 5,
-    speedX: Math.random() * 2 - 1,
-    speedY: Math.random() * 2 - 1
-  }));
+// Previous waveform data for smooth transitions
+const prevWaveform = ref(new Float32Array(0));
+
+// Initialize canvas
+const initCanvas = () => {
+  if (!canvas.value) return;
+
+  canvas.value.width = window.innerWidth;
+  canvas.value.height = window.innerHeight;
+  ctx.value = canvas.value.getContext('2d');
+
+  // Set up shadow for glow effect
+  ctx.value.shadowBlur = 10;
+  ctx.value.shadowColor = '#0f0';
+  ctx.value.lineWidth = 2;
+
+  // Draw initial frame
+  const width = canvas.value.width;
+  const height = canvas.value.height;
+
+  // Clear canvas
+  ctx.value.fillStyle = `hsla(${colorHue.value}, 100%, 20%, .8)`;
+  ctx.value.fillRect(0, 0, width, height);
 };
 
-// Update particle positions
-const updateParticles = (bassAvg, midAvg, highAvg) => {
-  const ctx = particleCanvas.value.getContext('2d');
-  ctx.clearRect(0, 0, containerWidth.value, containerHeight.value);
-  ctx.fillStyle = 'rgba(255,255,255,0.5)';
-
-  particles.value.forEach((particle) => {
-    // Update size and speed based on frequencies
-    particle.size = Math.max(2, bassAvg / 30);
-    particle.x += particle.speedX * (midAvg / 10);
-    particle.y += particle.speedY * (highAvg / 10);
-
-    // Wrap around edges
-    if (particle.x < 0) particle.x = containerWidth.value;
-    if (particle.x > containerWidth.value) particle.x = 0;
-    if (particle.y < 0) particle.y = containerHeight.value;
-    if (particle.y > containerHeight.value) particle.y = 0;
-
-    // Draw particle
-    ctx.beginPath();
-    ctx.arc(particle.x, particle.y, particle.size, 0, Math.PI * 2);
-    ctx.fill();
-  });
-};
-
-// Draw waveform
-const drawWaveform = (timeData) => {
-  const ctx = waveformCanvas.value.getContext('2d');
-  ctx.clearRect(0, 0, containerWidth.value, containerHeight.value);
-
-  ctx.beginPath();
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-  ctx.lineWidth = 2;
-
-  const sliceWidth = containerWidth.value / timeData.length;
-  let x = 0;
-
-  timeData.forEach((v, i) => {
-    const y = (v / 128.0) * (containerHeight.value / 2);
-    if (i === 0) {
-      ctx.moveTo(x, y);
-    } else {
-      ctx.lineTo(x, y);
-    }
-    x += sliceWidth;
-  });
-
-  ctx.stroke();
-};
-
-// Update SVG morph
-const updateMorph = (bassAvg) => {
-  const points = [];
-  const numPoints = 8;
-  const centerX = containerWidth.value / 2;
-  const centerY = containerHeight.value / 2;
-  const radius = 50 + bassAvg / 2;
-
-  for (let i = 0; i < numPoints; i++) {
-    const angle = (i / numPoints) * Math.PI * 2;
-    const x = centerX + Math.cos(angle) * radius;
-    const y = centerY + Math.sin(angle) * radius;
-    points.push(`${x},${y}`);
-  }
-
-  morphPoints.value = points;
-};
-
-// Beat detection
-const detectBeat = (dataArray) => {
-  const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-  const energy = average / 256;
-  energyHistory.value.push(energy);
-
-  if (energyHistory.value.length > 30) {
-    energyHistory.value.shift();
-  }
-
-  const averageEnergy = energyHistory.value.reduce((a, b) => a + b) / energyHistory.value.length;
-  beatDetected.value = energy > averageEnergy * ENERGY_THRESHOLD;
-};
-
-const animate = () => {
-  const freqData = new Uint8Array(analyser.value.frequencyBinCount);
-  const timeData = new Uint8Array(analyser.value.frequencyBinCount);
-
-  analyser.value.getByteFrequencyData(freqData);
-  analyser.value.getByteTimeDomainData(timeData);
-
-  // Split frequency data into bands
-  const bassData = freqData.slice(0, 8);
-  const midData = freqData.slice(8, 24);
-  const highData = freqData.slice(24, 48);
-
-  const bassAvg = bassData.reduce((a, b) => a + b) / bassData.length;
-  const midAvg = midData.reduce((a, b) => a + b) / midData.length;
-  const highAvg = highData.reduce((a, b) => a + b) / highData.length;
-
-  // Detect beats
-  detectBeat(bassData);
-
-  // Update all visualizations
-  if (
-    effects.value.find((e) => e.name === 'Filters')?.active ||
-    effects.value.find((e) => e.name === 'Transform')?.active
-  ) {
-    filters.value = {
-      hueRotate: (midAvg * 1.5) % 360,
-      brightness: 100 + highAvg / 2,
-      contrast: 100 + midAvg / 2,
-      blur: beatDetected.value ? highAvg / 30 : 0,
-      scale: 1 + bassAvg / 500 + (beatDetected.value ? 0.1 : 0),
-      rotate: midAvg / 5 - 10,
-      translateZ: -100 + midAvg,
-      perspective: 1000 + bassAvg * 2,
-      rotateY: highAvg / 2
-    };
-  }
-
-  if (effects.value.find((e) => e.name === 'Particles')?.active) {
-    updateParticles(bassAvg, midAvg, highAvg);
-  }
-
-  if (effects.value.find((e) => e.name === 'Waveform')?.active) {
-    drawWaveform(timeData);
-  }
-
-  if (effects.value.find((e) => e.name === 'Morphing')?.active) {
-    updateMorph(bassAvg);
-  }
-
-  animationId.value = requestAnimationFrame(animate);
-};
-
-// Audio handling methods
+// Audio handling
 const handleAudioUpload = async (event) => {
   const file = event.target.files[0];
   if (!file) return;
 
-  // Stop any existing playback
-  stopPlayback();
-
-  // Initialize audio context if needed
-  if (!audioContext.value) {
-    audioContext.value = new (window.AudioContext || window.webkitAudioContext)();
-    analyser.value = audioContext.value.createAnalyser();
-    analyser.value.fftSize = 256;
-  }
+  stopAudioPlayback();
 
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    audioBuffer.value = await audioContext.value.decodeAudioData(arrayBuffer);
-    hasAudio.value = true;
+    audioElement.value = new Audio();
+    const audioUrl = URL.createObjectURL(file);
+    audioElement.value.src = audioUrl;
+
+    audioElement.value.onloadeddata = () => {
+      setupAudioChain();
+      hasAudio.value = true;
+    };
   } catch (error) {
     console.error('Error loading audio:', error);
     hasAudio.value = false;
   }
 };
 
-const handleImageUpload = (event) => {
-  const file = event.target.files[0];
-  if (!file) return;
+const setupAudioChain = () => {
+  if (!audioContext.value) {
+    audioContext.value = new (window.AudioContext || window.webkitAudioContext)();
+    analyser.value = audioContext.value.createAnalyser();
+    analyser.value.fftSize = 2048; // Higher FFT size for smoother waveform
+  }
 
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    imageUrl.value = e.target.result;
-  };
-  reader.readAsDataURL(file);
-};
-
-const setupAudioSource = () => {
-  audioSource.value = audioContext.value.createBufferSource();
-  audioSource.value.buffer = audioBuffer.value;
-  audioSource.value.connect(analyser.value);
+  const source = audioContext.value.createMediaElementSource(audioElement.value);
+  source.connect(analyser.value);
   analyser.value.connect(audioContext.value.destination);
+
+  // Initialize previous waveform array
+  prevWaveform.value = new Float32Array(analyser.value.frequencyBinCount);
 };
 
-const startPlayback = () => {
-  if (!hasAudio.value) return;
+const togglePlay = () => {
+  //if (!hasAudio.value) return;
 
-  setupAudioSource();
-  audioSource.value.start(0);
+  if (!audioElement.value) {
+    audioElement.value = new Audio('/triba.mp3');
+    audioElement.value.onloadeddata = () => {
+      setupAudioChain();
+      hasAudio.value = true;
+      // Start playing once loaded
+      startAudioPlayback();
+    };
+    return;
+  }
+
+  abstractionControlsVisible.value = false;
+
+  if (isPlaying.value) {
+    stopAudioPlayback();
+  } else {
+    startAudioPlayback();
+  }
+};
+
+const startAudioPlayback = () => {
+  audioElement.value.play();
   animate();
   isPlaying.value = true;
+
+  // Start image cycling when playing
+  imageInterval.value = setInterval(() => {
+    currentImageIndex.value = currentImageIndex.value === 3 ? 1 : currentImageIndex.value + 1;
+  }, 30000);
 };
 
-const stopPlayback = () => {
-  if (audioSource.value) {
-    try {
-      audioSource.value.stop();
-    } catch (error) {
-      console.error('Error stopping audio source:', error);
-    }
+const stopAudioPlayback = () => {
+  if (audioElement.value) {
+    audioElement.value.pause();
   }
   if (animationId.value) {
     cancelAnimationFrame(animationId.value);
   }
+  // Clear the interval when paused
+  if (imageInterval.value) {
+    clearInterval(imageInterval.value);
+  }
   isPlaying.value = false;
 };
 
-const togglePlay = () => {
-  if (isPlaying.value) {
-    stopPlayback();
-  } else {
-    startPlayback();
-  }
+// Utility function for smooth transitions
+const lerp = (start, end, amt) => {
+  return (1 - amt) * start + amt * end;
 };
 
-const updateEffects = () => {
-  // Clear canvases if effects are disabled
-  if (!effects.value.find((e) => e.name === 'Particles')?.active) {
-    const ctx = particleCanvas.value.getContext('2d');
-    ctx.clearRect(0, 0, containerWidth.value, containerHeight.value);
-  }
-  if (!effects.value.find((e) => e.name === 'Waveform')?.active) {
-    const ctx = waveformCanvas.value.getContext('2d');
-    ctx.clearRect(0, 0, containerWidth.value, containerHeight.value);
-  }
+// Enhanced waveform visualization with controls
+const drawWaveform = (timeData) => {
+  const width = canvas.value.width;
+  const height = canvas.value.height;
+  const centerY = height / 2;
+  const scale = height / 3;
+
+  // Apply slight fade effect
+  ctx.value.fillStyle = 'rgba(0, 0, 0, 0.1)';
+  ctx.value.fillRect(0, 0, width, height);
+
+  // Scale factors based on slider values
+  const modScale = waveModulation.value / 100;
+  const smoothScale = curveSmoothing.value / 100;
+  const timeScale = timeDistortion.value / 100;
+
+  // Generate color from hue (using HSL with fixed saturation and lightness)
+  const waveColor = `hsl(${colorHue.value}, 100%, 50%)`;
+
+  // Update shadow color to match wave color
+  ctx.value.shadowColor = waveColor;
+
+  // Draw multiple layers with different characteristics
+  drawWaveformLayer(timeData, centerY, scale, 1.0, waveColor, 1.0, modScale, smoothScale, timeScale);
+  drawWaveformLayer(timeData, centerY, scale * 0.8, 0.7, waveColor, 0.4, modScale * 0.8, smoothScale, timeScale);
+  drawWaveformLayer(timeData, centerY, scale * 1.2, 1.3, waveColor, 0.3, modScale * 1.2, smoothScale, timeScale);
 };
 
+const drawWaveformLayer = (
+  timeData,
+  centerY,
+  scale,
+  timeScale,
+  color,
+  alpha,
+  modScale,
+  smoothScale,
+  timeDistortionScale
+) => {
+  const width = canvas.value.width;
+
+  ctx.value.beginPath();
+  ctx.value.strokeStyle = color;
+  ctx.value.globalAlpha = alpha;
+
+  const sliceWidth = width / timeData.length;
+  let x = 0;
+
+  for (let i = 0; i < timeData.length; i++) {
+    const time = Date.now() / 1000;
+
+    // Modulation intensity controlled by slider
+    const modulation = Math.sin(time * 2 + i * 0.1) * 0.15 * modScale;
+    const frequencyMod = Math.sin(i * 0.1) * 0.1 * modScale;
+
+    // Time distortion controlled by slider
+    const timeDistortion = Math.sin(time * timeDistortionScale + i * 0.01) * 0.1;
+
+    // Combine modulations with control scaling
+    const v = timeData[i] * timeScale + modulation + frequencyMod + timeDistortion;
+
+    // Smoothing controlled by slider
+    const smoothingFactor = 0.3 + smoothScale * 0.6; // Range from 0.3 to 0.9
+    const smoothV = v * (1 - smoothingFactor) + (prevWaveform.value[i] || 0) * smoothingFactor;
+    const y = centerY + smoothV * scale;
+
+    if (i === 0) {
+      ctx.value.moveTo(x, y);
+    } else {
+      const prevX = x - sliceWidth;
+      const prevY = centerY + prevWaveform.value[i - 1] * scale;
+      const cpx = (x + prevX) / 2;
+
+      // Curve intensity affected by smoothing
+      const curveIntensity = smoothScale * 1.5;
+      ctx.value.quadraticCurveTo(
+        cpx + Math.sin(time + i) * curveIntensity,
+        prevY + Math.cos(time + i) * curveIntensity,
+        x,
+        y
+      );
+    }
+
+    x += sliceWidth;
+    prevWaveform.value[i] = smoothV;
+  }
+
+  ctx.value.stroke();
+  ctx.value.globalAlpha = 1.0;
+};
+
+const animate = () => {
+  if (!ctx.value || !analyser.value) return;
+
+  const timeData = new Float32Array(analyser.value.frequencyBinCount);
+  analyser.value.getFloatTimeDomainData(timeData);
+
+  // Apply some preprocessing to the time data
+  const processedData = new Float32Array(timeData.length);
+  for (let i = 0; i < timeData.length; i++) {
+    // Add subtle phase shifting
+    const phaseShift = Math.sin(Date.now() / 1000 + i * 0.01) * 0.1;
+    processedData[i] = timeData[i] + phaseShift;
+  }
+
+  drawWaveform(processedData);
+  animationId.value = requestAnimationFrame(animate);
+};
+
+// Lifecycle hooks
 onMounted(() => {
-  if (container.value) {
-    containerWidth.value = container.value.offsetWidth;
-    containerHeight.value = container.value.offsetHeight;
-  }
-  initParticles();
+  initCanvas();
+  window.addEventListener('resize', initCanvas);
 });
 
 onBeforeUnmount(() => {
-  stopPlayback();
+  stopAudioPlayback();
   if (audioContext.value) {
     audioContext.value.close();
   }
+  window.removeEventListener('resize', initCanvas);
 });
 </script>
 
 <style scoped>
-
-.audio-visualizer {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+.scope-visualizer {
   position: fixed;
-  width: 100%;
-  height: 100%;
-  left: 0;
   top: 0;
-  z-index: -1;
-  pointer-events: none;
-  
-  height: 100vh;
-
-  img {
-    object-fit: cover;
-  }
-}
-
-.visualization-container {
-  position: relative;
-  height: 100%;
+  left: 0;
   width: 100vw;
   height: 100vh;
-  overflow: hidden;
+  background: var(--bg-color);
 }
 
-.visualization-container img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  transition: filter 0.1s ease, transform 0.1s ease;
-}
-
-.svg-overlay,
-.particle-overlay,
-.waveform-overlay {
+.scope-canvas {
   position: absolute;
   top: 0;
   left: 0;
   width: 100%;
   height: 100%;
-  pointer-events: none;
-  z-index: 1000;
 }
 
 .controls {
-  padding: 2rem;
   position: fixed;
-  left: 0;
-  bottom: 0;
-  background: black;
-  width: 100%;
+  bottom: 2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 1rem;
+  z-index: 1000;
+}
+
+.abstraction-controls {
+  position: fixed;
+  top: 2rem;
+  right: 2rem;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 1.5rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--current-color-dim);
+  color: var(--current-color);
+  font-family: monospace;
+  z-index: 1000;
+}
+
+.control-group {
+  margin-bottom: 1rem;
   display: flex;
   flex-direction: column;
-  gap: 1rem;
-  align-items: center;
-  color: white;
-}
-
-.effect-toggles {
-  display: flex;
-  gap: 1rem;
-  flex-wrap: wrap;
-  justify-content: center;
-}
-
-.effect-toggles label {
-  display: flex;
-  align-items: center;
   gap: 0.5rem;
-  color: white;
-  cursor: pointer;
+
+  label {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+
+    .slider {
+      flex: 1;
+    }
+  }
 }
 
-/* Rest of the styles from previous version... */
+.control-group:last-child {
+  margin-bottom: 0;
+}
+
+.slider {
+  width: 200px;
+  height: 4px;
+  background: var(--current-color-dim);
+  border-radius: 2px;
+  outline: none;
+  -webkit-appearance: none;
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  background: var(--current-color);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+
+.value {
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+.color-controls {
+  margin-top: 2rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--current-color-dim);
+}
+
+.color-slider {
+  background: linear-gradient(
+    to right,
+    hsl(0, 100%, 50%),
+    hsl(60, 100%, 50%),
+    hsl(120, 100%, 50%),
+    hsl(180, 100%, 50%),
+    hsl(240, 100%, 50%),
+    hsl(300, 100%, 50%),
+    hsl(360, 100%, 50%)
+  );
+}
+
+.color-slider::-webkit-slider-thumb {
+  background: white;
+  border: 2px solid rgba(0, 0, 0, 0.3);
+}
+
+button:disabled,
+.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.button {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 0 1.5rem;
+  background: var(--current-color-dim);
+  border: 1px solid var(--current-color);
+  border-radius: 0.5rem;
+  color: var(--current-color);
+  cursor: pointer;
+  font-family: monospace;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  transition: all 0.2s ease;
+}
+
+.toggle-abstraction-controls {
+  font-size: 2rem;
+}
+
+.upload-btn:hover,
+.play-btn:hover {
+  background: var(--current-color-dim);
+}
+
+.file-input {
+  display: none;
+}
+
+.play-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+canvas {
+  mix-blend-mode: hard-light;
+}
+
+.bg-container {
+  height: 100%;
+}
+
+.bg {
+  height: 100%;
+  width: 100%;
+  object-fit: cover;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 1s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
 </style>
