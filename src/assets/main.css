@@ -1,3 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 :root {
   --bg-color: #151414;
+}
+
+body {
+  font-family: "Lato", serif;
+  font-weight: 400;
+  color: white;
+}
+
+.caps {
+  @apply font-light uppercase;
+  letter-spacing: .25rem;
+}
+
+.button {
+
+}
+
+.button:disabled,
+.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
 }
